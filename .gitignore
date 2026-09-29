@@ -1,0 +1,9 @@
+build/
+sdkconfig
+sdkconfig.old
+managed_components/
+data/raw/
+data/labeled/
+*.pyc
+__pycache__/
+.venv/
