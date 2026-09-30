@@ -7,3 +7,6 @@ data/labeled/
 *.pyc
 __pycache__/
 .venv/
+firmware/_esp-csi-ref/
+firmware/*/managed_components/
+firmware/*/dependencies.lock
