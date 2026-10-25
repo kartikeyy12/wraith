@@ -2,14 +2,14 @@
 CSI serial logger with ground-truth labeling.
 Run one session per zone: connects to the RX node's serial port, reads CSI_DATA
 lines for a fixed duration, tags every packet with the given zone label, writes
-a labeled CSV to disk.
+a labeled CSV to disk. Stores the raw int8 I/Q values (lossless, ~7x smaller than
+amplitude/phase JSON); amplitude and phase are recomputed when loading.
 
 Usage:
-    python3 csi_logger.py --port /dev/ttyACM0 --label zoneA --duration 900 --outdir ../../data/raw
+    python csi_logger.py --port COM5 --label zoneA --duration 600 --outdir ../../data/raw
 """
 import argparse
 import csv
-import json
 import sys
 import time
 from pathlib import Path
@@ -37,40 +37,47 @@ def run_logging_session(line_source, label: str, duration_s: float, outdir: Path
     outpath = outdir / f"{session_name}.csv"
 
     n_ok, n_skipped, n_malformed = 0, 0, 0
+    warned = False
     start = time.monotonic()
 
     with open(outpath, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["host_timestamp", "device_timestamp", "label", "rssi", "mac", "n_subcarriers", "amplitude_json", "phase_json"])
+        writer.writerow(["host_timestamp", "device_timestamp", "label", "rssi", "mac", "n_values", "raw_iq"])
+        try:
+            while time.monotonic() - start < duration_s:
+                if n_ok == 0 and not warned and time.monotonic() - start > 10:
+                    print("WARNING: no CSI packets in the first 10s. Check the COM port, that the TX board is powered, "
+                          "and that the RX board is plugged into its UART port.", file=sys.stderr)
+                    warned = True
 
-        while time.monotonic() - start < duration_s:
-            line = line_source.readline()
-            if not line:
-                continue
+                line = line_source.readline()
+                if not line:
+                    continue
 
-            record = parse_csi_line(line)
-            if record is None:
-                n_skipped += 1
-                continue
-            if "error" in record:
-                n_malformed += 1
-                continue
+                record = parse_csi_line(line)
+                if record is None:
+                    n_skipped += 1
+                    continue
+                if "error" in record:
+                    n_malformed += 1
+                    continue
 
-            writer.writerow([
-                time.time(),
-                record["local_timestamp"],
-                label,
-                record["rssi"],
-                record["mac"],
-                record["n_subcarriers"],
-                json.dumps(record["amplitude"].tolist()),
-                json.dumps(record["phase"].tolist()),
-            ])
-            n_ok += 1
+                writer.writerow([
+                    time.time(),
+                    record["local_timestamp"],
+                    label,
+                    record["rssi"],
+                    record["mac"],
+                    len(record["raw"]),
+                    " ".join(map(str, record["raw"])),
+                ])
+                n_ok += 1
 
-            if n_ok % 50 == 0:
-                elapsed = time.monotonic() - start
-                print(f"  [{elapsed:5.1f}s] {n_ok} packets logged (skipped={n_skipped}, malformed={n_malformed})", file=sys.stderr)
+                if n_ok % 500 == 0:
+                    elapsed = time.monotonic() - start
+                    print(f"  [{elapsed:6.1f}s] {n_ok} packets logged (skipped={n_skipped}, malformed={n_malformed})", file=sys.stderr)
+        except KeyboardInterrupt:
+            print("\nStopped early with Ctrl+C, keeping what was logged.", file=sys.stderr)
 
     print(f"Session done: {n_ok} packets written to {outpath} (skipped={n_skipped}, malformed={n_malformed})")
     return outpath, n_ok, n_skipped, n_malformed
@@ -78,7 +85,7 @@ def run_logging_session(line_source, label: str, duration_s: float, outdir: Path
 
 def main():
     ap = argparse.ArgumentParser(description="Log labeled CSI data for one zone session.")
-    ap.add_argument("--port", required=True, help="Serial port, e.g. /dev/ttyACM0")
+    ap.add_argument("--port", required=True, help="Serial port, e.g. COM5 (Windows) or /dev/ttyUSB0 (Linux)")
     ap.add_argument("--baud", type=int, default=921600)
     ap.add_argument("--label", required=True, help="Ground-truth zone label for this session, e.g. zoneA")
     ap.add_argument("--duration", type=float, required=True, help="Session length in seconds")

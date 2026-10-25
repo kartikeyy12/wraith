@@ -24,7 +24,13 @@ from csi_features import nbvi, sliding_windows, trim_subcarriers
 
 def load_session(csv_path: Path) -> tuple[np.ndarray, pd.DataFrame]:
     df = pd.read_csv(csv_path)
-    amplitudes = np.stack([np.array(json.loads(row)) for row in df["amplitude_json"]])
+    rows = [np.array(r.split(), dtype=np.int16) for r in df["raw_iq"]]
+    lens = [len(r) for r in rows]
+    mode_len = max(set(lens), key=lens.count)
+    rows = [r for r in rows if len(r) == mode_len]
+    raw = np.stack(rows).astype(np.float64)
+    imag, real = raw[:, 0::2], raw[:, 1::2]
+    amplitudes = np.sqrt(real**2 + imag**2)
     return amplitudes, df
 
 

@@ -1,7 +1,7 @@
 """
 CSI packet parser for ESP32-S3 esp-csi output.
 Parses the CSV line format Espressif's csi_recv example prints over serial,
-extracts per-subcarrier amplitude and phase.
+extracts per-subcarrier amplitude and phase, and keeps the raw int8 I/Q values.
 """
 import re
 import numpy as np
@@ -15,7 +15,7 @@ CSI_FIELDS = [
 
 def parse_csi_line(line: str) -> dict | None:
     """
-    Parse one raw CSI_DATA line into a dict of metadata + amplitude/phase arrays.
+    Parse one raw CSI_DATA line into a dict of metadata + amplitude/phase/raw arrays.
     Returns None if the line isn't a valid CSI_DATA line.
     """
     line = line.strip()
@@ -41,12 +41,10 @@ def parse_csi_line(line: str) -> dict | None:
     imag = np.array(raw[0::2], dtype=np.float64)
     real = np.array(raw[1::2], dtype=np.float64)
 
-    amplitude = np.sqrt(real**2 + imag**2)
-    phase = np.arctan2(imag, real)
-
-    record["n_subcarriers"] = len(amplitude)
-    record["amplitude"] = amplitude
-    record["phase"] = phase
+    record["n_subcarriers"] = len(real)
+    record["amplitude"] = np.sqrt(real**2 + imag**2)
+    record["phase"] = np.arctan2(imag, real)
+    record["raw"] = raw  # lossless [imag, real, imag, real, ...] ints
     record["rssi"] = int(record["rssi"])
     record["local_timestamp"] = int(record["local_timestamp"])
 
