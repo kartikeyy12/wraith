@@ -1,14 +1,12 @@
 """
-Quick sanity-check visualization for a labeled CSI CSV session (as produced by csi_logger.py).
-Plots:
-  1. Amplitude heatmap: subcarrier index (y) vs packet index (x)
-  2. NBVI over time, computed via sliding windows, to eyeball motion/stillness separation
+Sanity-check plot for one logged session.
 
-Usage:
-    python3 csi_visualize.py --csv ../../data/raw/zoneA_1234567890.csv --out zoneA_check.png
+    python csi_visualize.py --csv ../../data/raw/<session>.csv
+
+Panels: LLTF amplitude heatmap (valid subcarriers x time), turbulence series (Hampel filtered),
+and the per-window turbulence std (the main motion feature).
 """
 import argparse
-import json
 import sys
 from pathlib import Path
 
@@ -16,71 +14,47 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "dsp"))
-from csi_features import nbvi, sliding_windows, trim_subcarriers
-
-
-def load_session(csv_path: Path) -> tuple[np.ndarray, pd.DataFrame]:
-    df = pd.read_csv(csv_path)
-    rows = [np.array(r.split(), dtype=np.int16) for r in df["raw_iq"]]
-    lens = [len(r) for r in rows]
-    mode_len = max(set(lens), key=lens.count)
-    rows = [r for r in rows if len(r) == mode_len]
-    raw = np.stack(rows).astype(np.float64)
-    imag, real = raw[:, 0::2], raw[:, 1::2]
-    amplitudes = np.sqrt(real**2 + imag**2)
-    return amplitudes, df
-
-
-def plot_session(amplitudes: np.ndarray, df: pd.DataFrame, out_path: Path, window_size: int = 1000, step: int = 500):
-    label = df["label"].iloc[0] if "label" in df.columns else "unknown"
-    n_packets = amplitudes.shape[0]
-
-    fig, axes = plt.subplots(2, 1, figsize=(12, 8), height_ratios=[2, 1])
-
-    im = axes[0].imshow(amplitudes.T, aspect="auto", origin="lower", cmap="viridis")
-    axes[0].set_title(f"CSI Amplitude Heatmap — label='{label}' — {n_packets} packets")
-    axes[0].set_xlabel("Packet index")
-    axes[0].set_ylabel("Subcarrier index")
-    fig.colorbar(im, ax=axes[0], label="Amplitude")
-
-    packet_list = [trim_subcarriers(a) for a in amplitudes]
-    if n_packets >= window_size:
-        nbvi_vals, centers = [], []
-        for start, window in sliding_windows(packet_list, window_size=window_size, step=step):
-            nbvi_vals.append(nbvi(window))
-            centers.append(start + window_size // 2)
-        axes[1].plot(centers, nbvi_vals, marker="o")
-        axes[1].set_title(f"NBVI over time (window={window_size}, step={step})")
-        axes[1].set_xlabel("Packet index")
-        axes[1].set_ylabel("NBVI")
-    else:
-        axes[1].text(0.5, 0.5, f"Not enough packets for one window\n(have {n_packets}, need {window_size})",
-                      ha="center", va="center", transform=axes[1].transAxes)
-
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=120)
-    print(f"Saved plot to {out_path}")
-    print(f"Session summary: label='{label}', n_packets={n_packets}, n_subcarriers={amplitudes.shape[1]}")
-    if n_packets >= window_size:
-        print(f"NBVI: mean={np.mean(nbvi_vals):.4f}, min={np.min(nbvi_vals):.4f}, max={np.max(nbvi_vals):.4f}")
+from csi_features import (FeatureConfig, amplitude_valid, hampel, resample_uniform,  # noqa: E402
+                          session_windows, turbulence)
+from csi_io import load_session  # noqa: E402
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--csv", required=True)
-    ap.add_argument("--out", default=None, help="Output PNG path. Defaults to <csv_stem>_check.png")
-    ap.add_argument("--window-size", type=int, default=1000)
-    ap.add_argument("--step", type=int, default=500)
-    args = ap.parse_args()
+    ap.add_argument("--out", default=None)
+    ap.add_argument("--fs", type=float, default=50.0)
+    ap.add_argument("--win-s", type=float, default=5.0)
+    ap.add_argument("--step-s", type=float, default=2.5)
+    a = ap.parse_args()
+    cfg = FeatureConfig(fs=a.fs, win_s=a.win_s, step_s=a.step_s)
+    csv = Path(a.csv)
+    out = Path(a.out) if a.out else csv.with_name(csv.stem + "_check.png")
 
-    csv_path = Path(args.csv)
-    out_path = Path(args.out) if args.out else csv_path.with_name(csv_path.stem + "_check.png")
+    s = load_session(csv)
+    g, Ag, ok = resample_uniform(s.t, amplitude_valid(s, cfg), cfg.fs, cfg.max_gap_s)
+    turb = hampel(turbulence(Ag, cfg.turb_mode), cfg.hampel_win, cfg.hampel_thr)
+    X, ts, names = session_windows(s, cfg)
 
-    amplitudes, df = load_session(csv_path)
-    plot_session(amplitudes, df, out_path, window_size=args.window_size, step=args.step)
+    fig, ax = plt.subplots(3, 1, figsize=(12, 9), height_ratios=[2, 1, 1], sharex=True)
+    im = ax[0].imshow(Ag.T, aspect="auto", origin="lower", cmap="viridis", extent=[g[0], g[-1], 0, Ag.shape[1]])
+    fig.colorbar(im, ax=ax[0], label="amplitude")
+    ax[0].set_ylabel("valid subcarrier")
+    ax[0].set_title(f"{s.name}  label={s.label}  activity={s.activity}  day={s.day}  packets={len(s.t)}")
+    ax[1].plot(g, turb, lw=0.8)
+    ax[1].set_ylabel("turbulence")
+    if len(X):
+        ax[2].plot(ts + cfg.win_s / 2, X[:, names.index("turb_std")], marker="o")
+    ax[2].set_ylabel("window turb_std")
+    ax[2].set_xlabel("time (s)")
+    fig.tight_layout()
+    fig.savefig(out, dpi=110)
+    print(f"saved {out}   windows={len(X)}   dropped packets={s.n_dropped}")
+    if len(X):
+        v = X[:, names.index("turb_std")]
+        print(f"turb_std: mean={v.mean():.4f} min={v.min():.4f} max={v.max():.4f}")
 
 
 if __name__ == "__main__":

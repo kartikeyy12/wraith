@@ -10,3 +10,4 @@ __pycache__/
 firmware/_esp-csi-ref/
 firmware/*/managed_components/
 firmware/*/dependencies.lock
+firmware/_variants/
